@@ -36,21 +36,55 @@ local function handleCommandLineArgs()
     return false
 end
 
+local function waitForActorPeers(maxWaitSeconds)
+    maxWaitSeconds = maxWaitSeconds or 10
+    Write.Info("Waiting for actor system to discover peers (max %d seconds)...", maxWaitSeconds)
+    
+    local startTime = os.time()
+    local lastPeerCount = 0
+    
+    while os.time() - startTime < maxWaitSeconds do
+        local peers = Common.getDannetPeers()
+        local peerCount = #peers
+        
+        if peerCount > lastPeerCount then
+            Write.Info("Found %d peers so far...", peerCount)
+            lastPeerCount = peerCount
+        end
+        
+        -- If we have a reasonable number of peers, continue
+        -- We expect at least some peers for group formation
+        if peerCount > 0 then
+            -- Wait a bit more to ensure all peers are discovered
+            mq.delay(2000)
+            return true
+        end
+        
+        mq.delay(500)
+    end
+    
+    Write.Warn("Timeout waiting for peers after %d seconds", maxWaitSeconds)
+    return false
+end
+
 local function main()
     config = Configuration.load()
     Commands.init(config)
     
-    if handleCommandLineArgs() then
-        Commands.cleanup()
-        return
-    end
+    -- Check if we need to handle command line args
+    local hasCommandLineArgs = #args > 0 and (string.lower(args[1]) == "form" or string.lower(args[1]) == "info")
     
-    -- Initialize Actor system if configured
+    -- Initialize Actor system if configured (needed for both UI and command line)
     if config.useActors then
         Write.Debug("Initializing Actor system...")
         local success, actorSuccess = pcall(function() return Common.initActorSystem(config) end)
         if success and actorSuccess then
             Write.Debug("Actor system initialized successfully")
+            
+            -- If we have command line args, wait for peers to be discovered
+            if hasCommandLineArgs and string.lower(args[1]) == "form" then
+                waitForActorPeers(10)
+            end
         else
             if not success then
                 Write.Error("Actor system initialization error: %s", tostring(actorSuccess))
@@ -58,6 +92,17 @@ local function main()
                 Write.Warn("Actor system initialization failed, falling back to DanNet")
             end
         end
+    end
+    
+    -- Now handle command line args after actors are ready
+    if handleCommandLineArgs() then
+        -- Cleanup actors if they were started
+        if Common.isActorSystemActive() then
+            Write.Debug("Shutting down Actor system after command execution...")
+            Common.shutdownActorSystem()
+        end
+        Commands.cleanup()
+        return
     end
     
     UI.init(config)
