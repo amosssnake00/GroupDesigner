@@ -2,6 +2,7 @@
 local mq = require('mq')
 local actors = require('actors')
 local Write = require('utils.Write')
+local Common = require('utils.common')
 
 local ActorManager = {}
 
@@ -68,7 +69,7 @@ function ActorManager.deployActors()
     -- Stop any existing actor scripts on all peers
     local dannetPeers = nil
     local success, result = pcall(function() return mq.TLO.DanNet.Peers() end)
-    if success and result and result ~= "" and result ~= "NULL" then
+    if success and Common.isSafeString(result) then
         dannetPeers = result
     end
     
@@ -78,7 +79,7 @@ function ActorManager.deployActors()
     -- Collect all peers
     if dannetPeers then
         for peer in string.gmatch(dannetPeers, "([^|]+)") do
-            if peer and peer ~= "" then
+            if Common.isSafeString(peer) then
                 table.insert(peerList, peer)
                 -- Stop any existing actor script
                 mq.cmdf('/squelch /dex %s /lua stop GroupDesigner/groupdesigner_actors', peer)
@@ -117,9 +118,9 @@ function ActorManager.getPeerData()
         local peers = {}
         local dannetPeers = nil
         local success, result = pcall(function() return mq.TLO.DanNet.Peers() end)
-        if success and result and result ~= "" and result ~= "NULL" then
+        if success and Common.isSafeString(result) then
             for peer in string.gmatch(result, "([^|]+)") do
-                if peer and peer ~= "" then
+                if Common.isSafeString(peer) then
                     table.insert(peers, {
                         name = peer,
                         class = "---",
@@ -191,9 +192,9 @@ function ActorManager.shutdownAllActors()
     -- Stop all peer actor scripts
     local dannetPeers = nil
     local success, result = pcall(function() return mq.TLO.DanNet.Peers() end)
-    if success and result and result ~= "" and result ~= "NULL" then
+    if success and Common.isSafeString(result) then
         for peer in string.gmatch(result, "([^|]+)") do
-            if peer and peer ~= "" then
+            if Common.isSafeString(peer) then
                 mq.cmdf('/squelch /dex %s /lua stop GroupDesigner/groupdesigner_actors', peer)
             end
         end

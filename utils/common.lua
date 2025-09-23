@@ -50,6 +50,11 @@ function Common.delay(ms)
     mq.delay(ms)
 end
 
+-- Utility function to check if a string value is safe (not null, not empty)
+function Common.isSafeString(value)
+    return value and type(value) == "string" and value ~= "" and value ~= "NULL"
+end
+
 -- Async query system
 local pendingQueries = {}
 local queryResults = {}
@@ -99,7 +104,8 @@ function Common.processPendingQueries(delay, shouldExitFunc)
             end
             
             -- Check if query received
-            if mq.TLO.DanNet(queryData.peer).QReceived(queryData.query)() > 0 then
+            local received = mq.TLO.DanNet(queryData.peer).QReceived(queryData.query)()
+            if received and received > 0 then
                 break
             end
             
@@ -109,8 +115,8 @@ function Common.processPendingQueries(delay, shouldExitFunc)
         
         -- Get the result
         local result = mq.TLO.DanNet(queryData.peer).Q(queryData.query)()
-        
-        if result and result ~= "NULL" and result ~= "" then
+
+        if Common.isSafeString(result) then
             queryResults[queryId] = result
         else
             queryResults[queryId] = nil
@@ -136,9 +142,9 @@ function Common.getDannetPeerNames()
         dannetPeers = result
     end
     
-    if dannetPeers and type(dannetPeers) == "string" and dannetPeers ~= "" and dannetPeers ~= "NULL" then
+    if Common.isSafeString(dannetPeers) then
         for peer in string.gmatch(dannetPeers, "([^|]+)") do
-            if peer and type(peer) == "string" and peer ~= "" then
+            if Common.isSafeString(peer) then
                 table.insert(peerNames, peer)
             end
         end
@@ -272,22 +278,10 @@ end
 -- Get the local character name
 function Common.getLocalCharacterName()
     local success, result = pcall(function() return mq.TLO.Me.Name() end)
-    if success and result and result ~= "NULL" and result ~= "" then
+    if success and Common.isSafeString(result) then
         return result
     end
     return nil
-end
-
--- Smart command sending that handles local vs remote characters
-function Common.sendToPeer(peer, command)
-    local localName = Common.getLocalCharacterName()
-    if localName and string.lower(peer) == string.lower(localName) then
-        -- Direct command for local character
-        mq.cmd(command)
-    else
-        -- Remote command via DanNet
-        mq.cmdf('/squelch /dex %s %s', peer, command)
-    end
 end
 
 -- Send command to specific character (handles local vs remote automatically)
@@ -302,12 +296,6 @@ function Common.sendCommandToCharacter(characterName, command)
     end
 end
 
-function Common.sendToGroup(groupMembers, command)
-    for _, member in ipairs(groupMembers) do
-        Common.sendToPeer(member.name, command)
-    end
-end
-
 -- Analyze current group membership and determine what needs to change
 function Common.analyzeGroupChanges(leaderName, expectedMembers, delay)
     delay = delay or 100
@@ -319,21 +307,24 @@ function Common.analyzeGroupChanges(leaderName, expectedMembers, delay)
     -- Query current group members
     for i = 0, 5 do
         local memberName = nil
-        
+
         if localName and string.lower(leaderName) == string.lower(localName) then
             -- Direct query for local character
             local success, result = pcall(function() return mq.TLO.Group.Member(i)() end)
-            if success and result and result ~= "NULL" and result ~= "" then
+            if success and Common.isSafeString(result) then
                 memberName = result
             end
         else
             -- Remote query via DanNet
             mq.cmdf('/dquery %s -q Group.Member[%d] -t %d', leaderName, i, delay * 25)
-            mq.delay(delay * 30, function() return mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))() > 0 end)
+            mq.delay(delay * 30, function() 
+                local received = mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))()
+                return received and received > 0
+            end)
             memberName = mq.TLO.DanNet(leaderName).Q(string.format('Group.Member[%d]', i))()
         end
         
-        if memberName and memberName ~= "NULL" and memberName ~= "" then
+        if Common.isSafeString(memberName) then
             currentMembers[string.lower(memberName)] = true
             Write.Debug("Current group member: %s", memberName)
         end
@@ -395,17 +386,20 @@ function Common.verifyGroupViaLeader(leaderName, expectedMembers, delay)
         if localName and string.lower(leaderName) == string.lower(localName) then
             -- Direct query for local character
             local success, result = pcall(function() return mq.TLO.Group.Member(i)() end)
-            if success and result and result ~= "NULL" and result ~= "" then
+            if success and Common.isSafeString(result) then
                 memberName = result
             end
         else
             -- Remote query via DanNet
             mq.cmdf('/dquery %s -q Group.Member[%d] -t %d', leaderName, i, delay * 25)
-            mq.delay(delay * 30, function() return mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))() > 0 end)
+            mq.delay(delay * 30, function()
+                local received = mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))()
+                return received and received > 0
+            end)
             memberName = mq.TLO.DanNet(leaderName).Q(string.format('Group.Member[%d]', i))()
         end
-        
-        if memberName and memberName ~= "NULL" and memberName ~= "" then
+
+        if Common.isSafeString(memberName) then
             actualMembers[string.lower(memberName)] = true  -- Store in lowercase for comparison
             Write.Debug("Group slot %d: %s", i, memberName)
         else
@@ -431,53 +425,6 @@ function Common.verifyGroupViaLeader(leaderName, expectedMembers, delay)
     end
 end
 
-function Common.waitForGroupStatus(groupMembers, inGroup)
-    local maxWait = 10000
-    local startTime = os.clock() * 1000
-    local localName = Common.getLocalCharacterName()
-    
-    Write.Debug("Waiting for group status: inGroup=%s", tostring(inGroup))
-    
-    while (os.clock() * 1000 - startTime) < maxWait do
-        local allCorrect = true
-        local statusReport = {}
-        
-        for _, member in ipairs(groupMembers) do
-            local memberInGroup = false
-            
-            if localName and string.lower(member.name) == string.lower(localName) then
-                -- Direct query for local character
-                local success, result = pcall(function() return mq.TLO.Group.Members() end)
-                if success and result and result ~= "NULL" and result ~= "" then
-                    memberInGroup = true
-                end
-            else
-                -- Remote query via DanNet
-                mq.cmdf('/dquery %s -q Group.Members -t 1000', member.name)
-                mq.delay(1500, function() return mq.TLO.DanNet(member.name).QReceived('Group.Members')() > 0 end)
-                local groupMembersResult = mq.TLO.DanNet(member.name).Q('Group.Members')()
-                memberInGroup = groupMembersResult and groupMembersResult ~= "NULL" and groupMembersResult ~= ""
-            end
-            
-            table.insert(statusReport, string.format("%s: %s", member.name, memberInGroup and "grouped" or "solo"))
-            if memberInGroup ~= inGroup then
-                allCorrect = false
-            end
-        end
-        
-        Write.Debug("Status: %s", table.concat(statusReport, ", "))
-        
-        if allCorrect then
-            Write.Debug("All members have correct group status!")
-            return true
-        end
-        
-        mq.delay(1000)
-    end
-    
-    Write.Debug("Timeout waiting for group status after %d seconds - continuing anyway", maxWait/1000)
-    return true  -- Continue anyway instead of failing
-end
 
 function Common.formGroup(groupData, keepRaid, delay, maxRetries)
     if not groupData or not groupData.members or #groupData.members == 0 then

@@ -36,15 +36,21 @@ local groupBlocks = {}
 local lastPeerRefresh = 0
 local autoRefreshInterval = 3  -- seconds
 
--- Initialize available peers from DanNet
-local function initializePeers()
+-- Refresh available peers from DanNet and actors if enabled
+local function refreshAvailablePeers()
+    -- Refresh actors data if the system is active
+    if config and config.useActors and Common.isActorSystemActive() then
+        Common.updateActorSystem()
+        Write.Debug("Refreshed actor system data")
+    end
+
     local allPeers = Common.getDannetPeers()
     availablePeers = {}
-    
+
     -- Filter out peers that are already assigned to groups
     for _, peer in ipairs(allPeers) do
         local isAssigned = false
-        
+
         -- Check if peer is already in a group block (case-insensitive)
         for _, group in ipairs(groupBlocks) do
             for _, member in ipairs(group.members) do
@@ -55,17 +61,406 @@ local function initializePeers()
             end
             if isAssigned then break end
         end
-        
+
         -- Only add to available if not assigned
         if not isAssigned then
             table.insert(availablePeers, peer)
         end
     end
-    
+
     Write.Debug("DanNet: Found %d total peers, %d available", #allPeers, #availablePeers)
-    
+
     -- Automatically queue queries for peer data
     Common.queuePeerDataQueries(availablePeers)
+end
+
+-- Load a group set (multiple groups)
+local function loadGroupSet(setName)
+    if not config or not config.groupSets or not config.groupSets[setName] then
+        Write.Warn("Group set '%s' not found", setName)
+        return
+    end
+
+    -- Clear current groups and reset to available peers
+    for _, group in ipairs(groupBlocks) do
+        for _, member in ipairs(group.members) do
+            -- Find full peer data and add back to available
+            local allPeers = Common.getDannetPeers()
+            for _, peer in ipairs(allPeers) do
+                if string.lower(peer.name) == string.lower(member.name) then
+                    table.insert(availablePeers, peer)
+                    break
+                end
+            end
+        end
+    end
+
+    -- Load the group set
+    local groupNames = config.groupSets[setName]
+    groupBlocks = {}
+
+    for i, groupName in ipairs(groupNames) do
+        if config.groups[groupName] then
+            local savedGroup = config.groups[groupName]
+            local newGroup = {
+                name = groupName,  -- Use the actual group name from config
+                members = {}
+            }
+
+            -- Load members into the group
+            for _, savedMember in ipairs(savedGroup.members) do
+                -- Remove from available peers and add to group (case-insensitive)
+                local found = false
+                for j = #availablePeers, 1, -1 do
+                    if string.lower(availablePeers[j].name) == string.lower(savedMember.name) then
+                        table.insert(newGroup.members, {
+                            name = availablePeers[j].name,  -- Use actual peer name
+                            class = availablePeers[j].class,
+                            level = availablePeers[j].level,
+                            ac = availablePeers[j].ac,
+                            maxhp = availablePeers[j].maxhp,
+                            maxmana = availablePeers[j].maxmana,
+                            maxendurance = availablePeers[j].maxendurance,
+                            zone = availablePeers[j].zone,
+                            roles = savedMember.roles or {}
+                        })
+                        table.remove(availablePeers, j)
+                        found = true
+                        break
+                    end
+                end
+
+                if not found then
+                    Write.Warn("Warning: Saved member '%s' not found in available peers", savedMember.name)
+                end
+            end
+
+            table.insert(groupBlocks, newGroup)
+        end
+    end
+
+    Write.Info("Loaded group set: %s (%d groups)", setName, #groupBlocks)
+end
+
+-- Load a single group
+local function loadSingleGroup(groupName)
+    if not config or not config.groups or not config.groups[groupName] then
+        Write.Warn("Group '%s' not found", groupName)
+        return
+    end
+
+    local savedGroup = config.groups[groupName]
+    local newGroup = {
+        name = groupName,
+        members = {}
+    }
+
+    -- Load members into the group
+    for _, savedMember in ipairs(savedGroup.members) do
+        -- Remove from available peers and add to group
+        for j = #availablePeers, 1, -1 do
+            if availablePeers[j].name == savedMember.name then
+                table.insert(newGroup.members, {
+                    name = savedMember.name,
+                    class = availablePeers[j].class,
+                    level = availablePeers[j].level,
+                    ac = availablePeers[j].ac,
+                    maxhp = availablePeers[j].maxhp,
+                    maxmana = availablePeers[j].maxmana,
+                    maxendurance = availablePeers[j].maxendurance,
+                    zone = availablePeers[j].zone,
+                    roles = savedMember.roles or {}
+                })
+                table.remove(availablePeers, j)
+                break
+            end
+        end
+    end
+
+    table.insert(groupBlocks, newGroup)
+    Write.Info("Loaded group: %s (%d members)", groupName, #newGroup.members)
+end
+
+-- Form all current groups (moved to be called from main thread)
+local function formCurrentGroups()
+    local groupsToForm = {}
+
+    -- Collect all groups with more than 1 member
+    for i, group in ipairs(groupBlocks) do
+        if #group.members > 1 then
+            table.insert(groupsToForm, {
+                name = group.name or ("TempGroup_" .. i),  -- Use actual name if available
+                members = group.members
+            })
+        end
+    end
+
+    if #groupsToForm == 0 then
+        Write.Warn("No groups with multiple members to form")
+        return
+    end
+
+    Write.Info("Forming %d groups using smart formation...", #groupsToForm)
+
+    -- Form each group and count successes
+    local successCount = 0
+    for _, groupData in ipairs(groupsToForm) do
+        local success, message = Common.formGroup(groupData, config.keepRaid, config.delay, config.maxRetries)
+        if success then
+            Write.Info("[SUCCESS] %s: %s", groupData.name, message)
+            successCount = successCount + 1
+        else
+            Write.Error("[FAILED] %s: %s", groupData.name, message)
+        end
+    end
+
+    Write.Info("Group formation complete!")
+
+    -- Update results and clear progress flag
+    formGroupsResults = {
+        success = successCount == #groupsToForm,
+        message = string.format("%d/%d groups formed", successCount, #groupsToForm)
+    }
+    formGroupsInProgress = false
+end
+
+-- Draw save group dialog
+local function drawSaveGroupDialog()
+    if not showSaveGroupDialog then return end
+
+    ImGui.SetNextWindowSize(400, 300)
+    showSaveGroupDialog, shouldDraw = ImGui.Begin("Save Group", showSaveGroupDialog, ImGuiWindowFlags.NoResize)
+
+    if shouldDraw then
+        ImGui.Text("Group Name:")
+        groupNameBuffer = ImGui.InputText("##GroupName", groupNameBuffer, 256)
+
+        if ImGui.Button("Save") and groupNameBuffer ~= "" then
+            local group = groupBlocks[saveGroupIndex]
+            if group then
+                local members = {}
+                for _, member in ipairs(group.members) do
+                    table.insert(members, {
+                        name = member.name,
+                        roles = member.roles or {}
+                    })
+                end
+                -- Check if this would be an overwrite
+                local existingName = Configuration.findExistingGroupName(config, groupNameBuffer)
+                if existingName then
+                    -- Show overwrite confirmation
+                    showSaveGroupDialog = false
+                    showOverwriteConfirmDialog = true
+                    overwriteTarget = existingName
+                    overwriteType = "group"
+                    overwriteData = {
+                        groupName = groupNameBuffer,
+                        members = members
+                    }
+                else
+                    -- Direct save - no overwrite needed
+                    local finalGroupName, wasOverwrite = Configuration.saveGroup(config, groupNameBuffer, members)
+                    Write.Info("Saved group '%s' with %d members", finalGroupName, #members)
+                    showSaveGroupDialog = false
+                end
+            end
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button("Cancel") then
+            showSaveGroupDialog = false
+        end
+
+        ImGui.Separator()
+        ImGui.Text("Existing Groups:")
+
+        if config and config.groups then
+            for name, _ in pairs(config.groups) do
+                ImGui.Text(name)
+                ImGui.SameLine()
+                if ImGui.SmallButton("Delete##" .. name) then
+                    -- Close parent dialog and show confirmation
+                    showSaveGroupDialog = false
+                    showDeleteConfirmDialog = true
+                    deleteTarget = name
+                    deleteType = "group"
+                end
+            end
+        end
+    end
+    ImGui.End()
+end
+
+-- Draw save group set dialog
+local function drawSaveGroupSetDialog()
+    if not showSaveGroupSetDialog then return end
+
+    ImGui.SetNextWindowSize(400, 350)
+    showSaveGroupSetDialog, shouldDraw = ImGui.Begin("Save Group Set", showSaveGroupSetDialog, ImGuiWindowFlags.NoResize)
+
+    if shouldDraw then
+        ImGui.Text("Group Set Name:")
+        groupSetNameBuffer = ImGui.InputText("##SetName", groupSetNameBuffer, 256)
+
+        if ImGui.Button("Save") and groupSetNameBuffer ~= "" then
+            -- Check if this would be an overwrite
+            local existingName = Configuration.findExistingGroupSetName(config, groupSetNameBuffer)
+            if existingName then
+                -- Show overwrite confirmation
+                showSaveGroupSetDialog = false
+                showOverwriteConfirmDialog = true
+                overwriteTarget = existingName
+                overwriteType = "groupset"
+                overwriteData = {
+                    setName = groupSetNameBuffer,
+                    groupBlocks = groupBlocks
+                }
+            else
+                -- Direct save - no overwrite needed
+                local finalSetName, wasOverwrite = Configuration.saveGroupSet(config, groupSetNameBuffer, groupBlocks)
+                Write.Info("Saved group set '%s' with automatic subgroup naming", finalSetName)
+                showSaveGroupSetDialog = false
+            end
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button("Cancel") then
+            showSaveGroupSetDialog = false
+        end
+
+        ImGui.Separator()
+        ImGui.Text("Existing Group Sets:")
+
+        if config and config.groupSets then
+            for name, _ in pairs(config.groupSets) do
+                ImGui.Text(name)
+                ImGui.SameLine()
+                if ImGui.SmallButton("Delete##" .. name) then
+                    -- Close parent dialog and show confirmation
+                    showSaveGroupSetDialog = false
+                    showDeleteConfirmDialog = true
+                    deleteTarget = name
+                    deleteType = "groupset"
+                end
+            end
+        end
+    end
+    ImGui.End()
+end
+
+-- Draw load group set dialog
+local function drawLoadGroupSetDialog()
+    if not showLoadGroupSetDialog then return end
+
+    ImGui.SetNextWindowSize(400, 300)
+    showLoadGroupSetDialog, shouldDraw = ImGui.Begin("Load Group Set", showLoadGroupSetDialog, ImGuiWindowFlags.NoResize)
+
+    if shouldDraw then
+        ImGui.Text("Select a Group Set to Load:")
+        ImGui.Separator()
+
+        if config and config.groupSets then
+            for setName, _ in pairs(config.groupSets) do
+                if ImGui.Button(setName .. "##load") then
+                    -- Load the group set
+                    loadGroupSet(setName)
+                    showLoadGroupSetDialog = false
+                end
+            end
+        else
+            ImGui.Text("No saved group sets found.")
+        end
+
+        ImGui.Separator()
+        if ImGui.Button("Cancel") then
+            showLoadGroupSetDialog = false
+        end
+
+        ImGui.Separator()
+        ImGui.Text("Individual Groups:")
+
+        if config and config.groups then
+            for groupName, _ in pairs(config.groups) do
+                if ImGui.Button(groupName .. "##loadgroup") then
+                    -- Load individual group
+                    loadSingleGroup(groupName)
+                    showLoadGroupSetDialog = false
+                end
+            end
+        else
+            ImGui.Text("No saved groups found.")
+        end
+    end
+    ImGui.End()
+end
+
+-- Draw delete confirmation dialog
+local function drawDeleteConfirmDialog()
+    if not showDeleteConfirmDialog then return end
+
+    ImGui.SetNextWindowSize(300, 120)
+    showDeleteConfirmDialog, shouldDraw = ImGui.Begin("Confirm Delete", showDeleteConfirmDialog, ImGuiWindowFlags.NoResize)
+
+    if shouldDraw then
+        ImGui.Text("Delete " .. (deleteType or "item") .. " '" .. (deleteTarget or "unknown") .. "'?")
+
+        if ImGui.Button("Yes") then
+            if deleteType == "group" then
+                Configuration.deleteGroup(config, deleteTarget)
+                Write.Info("Deleted group: %s", deleteTarget)
+            elseif deleteType == "groupset" then
+                Configuration.deleteGroupSet(config, deleteTarget)
+                Write.Info("Deleted group set: %s", deleteTarget)
+            end
+            showDeleteConfirmDialog = false
+            showSaveGroupDialog = false
+            showSaveGroupSetDialog = false
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button("No") then
+            showDeleteConfirmDialog = false
+        end
+    end
+    ImGui.End()
+end
+
+-- Draw overwrite confirmation dialog
+local function drawOverwriteConfirmDialog()
+    if not showOverwriteConfirmDialog then return end
+
+    ImGui.SetNextWindowSize(400, 150)
+    showOverwriteConfirmDialog, shouldDraw = ImGui.Begin("Confirm Overwrite", showOverwriteConfirmDialog, ImGuiWindowFlags.NoResize)
+
+    if shouldDraw then
+        ImGui.Text("A " .. (overwriteType or "item") .. " with a similar name already exists:")
+        ImGui.Text("'" .. (overwriteTarget or "unknown") .. "'")
+        ImGui.Text("")
+        ImGui.Text("Do you want to overwrite it?")
+
+        if ImGui.Button("Yes, Overwrite") then
+            if overwriteType == "groupset" and overwriteData then
+                local finalSetName, wasOverwrite = Configuration.saveGroupSet(config, overwriteData.setName, overwriteData.groupBlocks)
+                Write.Info("Overwritten group set '%s' with automatic subgroup naming", finalSetName)
+            elseif overwriteType == "group" and overwriteData then
+                local finalGroupName, wasOverwrite = Configuration.saveGroup(config, overwriteData.groupName, overwriteData.members)
+                Write.Info("Overwritten group '%s'", finalGroupName)
+            end
+            showOverwriteConfirmDialog = false
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button("Cancel") then
+            showOverwriteConfirmDialog = false
+            -- Reopen the appropriate save dialog
+            if overwriteType == "groupset" then
+                showSaveGroupSetDialog = true
+            elseif overwriteType == "group" then
+                showSaveGroupDialog = true
+            end
+        end
+    end
+    ImGui.End()
 end
 
 -- Initialize group blocks based on peer count
@@ -100,7 +495,7 @@ function UI.init(cfg)
     
     -- Initialize data
     initializeGroupBlocks()
-    initializePeers()
+    refreshAvailablePeers()
     
     -- Register the ImGui callback using proper MQ pattern
     mq.imgui.init('groupdesigner', UI.updateImGui)
@@ -129,7 +524,7 @@ function UI.updateImGui()
     if config and config.useActors and Common.isActorSystemActive() then
         local now = os.time()
         if now - lastPeerRefresh >= autoRefreshInterval then
-            initializePeers()
+            refreshAvailablePeers()
             lastPeerRefresh = now
             -- Update group blocks when peers are loaded
             initializeGroupBlocks()
@@ -202,12 +597,10 @@ function UI.updateImGui()
         -- Form Groups button - green if groups have members, gray if disabled
         ImGui.SameLine()
         local hasGroupsWithMembers = false
-        local totalMembers = 0
         for _, group in ipairs(groupBlocks) do
             if #group.members > 1 then
                 hasGroupsWithMembers = true
             end
-            totalMembers = totalMembers + #group.members
         end
         
         if hasGroupsWithMembers then
@@ -238,9 +631,9 @@ function UI.updateImGui()
         elseif formGroupsResults then
             ImGui.SameLine()
             if formGroupsResults.success then
-                ImGui.TextColored(0.2, 0.8, 0.2, 1.0, "✓ Completed")
+                ImGui.TextColored(0.2, 0.8, 0.2, 1.0, "Completed")
             else
-                ImGui.TextColored(0.8, 0.2, 0.2, 1.0, "✗ " .. (formGroupsResults.message or "Failed"))
+                ImGui.TextColored(0.8, 0.2, 0.2, 1.0, "" .. (formGroupsResults.message or "Failed"))
             end
         end
         
@@ -259,7 +652,7 @@ function UI.updateImGui()
             ImGui.Text("Available Peers (" .. #availablePeers .. "):")
             
             if ImGui.Button("Refresh Peers") then
-                initializePeers()
+                refreshAvailablePeers()
                 Write.Debug("Refreshed - %d peers available", #availablePeers)
             end
             
@@ -567,239 +960,10 @@ function UI.updateImGui()
     ImGui.End()
 end
 
-function drawSaveGroupDialog()
-    if not showSaveGroupDialog then return end
-    
-    ImGui.SetNextWindowSize(400, 300)
-    showSaveGroupDialog, shouldDraw = ImGui.Begin("Save Group", showSaveGroupDialog, ImGuiWindowFlags.NoResize)
-    
-    if shouldDraw then
-        ImGui.Text("Group Name:")
-        groupNameBuffer = ImGui.InputText("##GroupName", groupNameBuffer, 256)
-        
-        if ImGui.Button("Save") and groupNameBuffer ~= "" then
-            local group = groupBlocks[saveGroupIndex]
-            if group then
-                local members = {}
-                for _, member in ipairs(group.members) do
-                    table.insert(members, {
-                        name = member.name,
-                        roles = member.roles or {}
-                    })
-                end
-                -- Check if this would be an overwrite
-                local existingName = Configuration.findExistingGroupName(config, groupNameBuffer)
-                if existingName then
-                    -- Show overwrite confirmation
-                    showSaveGroupDialog = false
-                    showOverwriteConfirmDialog = true
-                    overwriteTarget = existingName
-                    overwriteType = "group"
-                    overwriteData = {
-                        groupName = groupNameBuffer,
-                        members = members
-                    }
-                else
-                    -- Direct save - no overwrite needed
-                    local finalGroupName, wasOverwrite = Configuration.saveGroup(config, groupNameBuffer, members)
-                    Write.Info("Saved group '%s' with %d members", finalGroupName, #members)
-                    showSaveGroupDialog = false
-                end
-            end
-        end
-        
-        ImGui.SameLine()
-        if ImGui.Button("Cancel") then
-            showSaveGroupDialog = false
-        end
-        
-        ImGui.Separator()
-        ImGui.Text("Existing Groups:")
-        
-        if config and config.groups then
-            for name, _ in pairs(config.groups) do
-                ImGui.Text(name)
-                ImGui.SameLine()
-                if ImGui.SmallButton("Delete##" .. name) then
-                    -- Close parent dialog and show confirmation
-                    showSaveGroupDialog = false
-                    showDeleteConfirmDialog = true
-                    deleteTarget = name
-                    deleteType = "group"
-                end
-            end
-        end
-    end
-    ImGui.End()
-end
 
-function drawSaveGroupSetDialog()
-    if not showSaveGroupSetDialog then return end
-    
-    ImGui.SetNextWindowSize(400, 350)
-    showSaveGroupSetDialog, shouldDraw = ImGui.Begin("Save Group Set", showSaveGroupSetDialog, ImGuiWindowFlags.NoResize)
-    
-    if shouldDraw then
-        ImGui.Text("Group Set Name:")
-        groupSetNameBuffer = ImGui.InputText("##SetName", groupSetNameBuffer, 256)
-        
-        if ImGui.Button("Save") and groupSetNameBuffer ~= "" then
-            -- Check if this would be an overwrite
-            local existingName = Configuration.findExistingGroupSetName(config, groupSetNameBuffer)
-            if existingName then
-                -- Show overwrite confirmation
-                showSaveGroupSetDialog = false
-                showOverwriteConfirmDialog = true
-                overwriteTarget = existingName
-                overwriteType = "groupset"
-                overwriteData = {
-                    setName = groupSetNameBuffer,
-                    groupBlocks = groupBlocks
-                }
-            else
-                -- Direct save - no overwrite needed
-                local finalSetName, wasOverwrite = Configuration.saveGroupSet(config, groupSetNameBuffer, groupBlocks)
-                Write.Info("Saved group set '%s' with automatic subgroup naming", finalSetName)
-                showSaveGroupSetDialog = false
-            end
-        end
-        
-        ImGui.SameLine()
-        if ImGui.Button("Cancel") then
-            showSaveGroupSetDialog = false
-        end
-        
-        ImGui.Separator()
-        ImGui.Text("Existing Group Sets:")
-        
-        if config and config.groupSets then
-            for name, _ in pairs(config.groupSets) do
-                ImGui.Text(name)
-                ImGui.SameLine()
-                if ImGui.SmallButton("Delete##" .. name) then
-                    -- Close parent dialog and show confirmation
-                    showSaveGroupSetDialog = false
-                    showDeleteConfirmDialog = true
-                    deleteTarget = name
-                    deleteType = "groupset"
-                end
-            end
-        end
-    end
-    ImGui.End()
-end
 
-function drawLoadGroupSetDialog()
-    if not showLoadGroupSetDialog then return end
-    
-    ImGui.SetNextWindowSize(400, 300)
-    showLoadGroupSetDialog, shouldDraw = ImGui.Begin("Load Group Set", showLoadGroupSetDialog, ImGuiWindowFlags.NoResize)
-    
-    if shouldDraw then
-        ImGui.Text("Select a Group Set to Load:")
-        ImGui.Separator()
-        
-        if config and config.groupSets then
-            for setName, _ in pairs(config.groupSets) do
-                if ImGui.Button(setName .. "##load") then
-                    -- Load the group set
-                    loadGroupSet(setName)
-                    showLoadGroupSetDialog = false
-                end
-            end
-        else
-            ImGui.Text("No saved group sets found.")
-        end
-        
-        ImGui.Separator()
-        if ImGui.Button("Cancel") then
-            showLoadGroupSetDialog = false
-        end
-        
-        ImGui.Separator()
-        ImGui.Text("Individual Groups:")
-        
-        if config and config.groups then
-            for groupName, _ in pairs(config.groups) do
-                if ImGui.Button(groupName .. "##loadgroup") then
-                    -- Load individual group
-                    loadSingleGroup(groupName)
-                    showLoadGroupSetDialog = false
-                end
-            end
-        else
-            ImGui.Text("No saved groups found.")
-        end
-    end
-    ImGui.End()
-end
 
-function drawDeleteConfirmDialog()
-    if not showDeleteConfirmDialog then return end
-    
-    ImGui.SetNextWindowSize(300, 120)
-    showDeleteConfirmDialog, shouldDraw = ImGui.Begin("Confirm Delete", showDeleteConfirmDialog, ImGuiWindowFlags.NoResize)
-    
-    if shouldDraw then
-        ImGui.Text("Delete " .. (deleteType or "item") .. " '" .. (deleteTarget or "unknown") .. "'?")
-        
-        if ImGui.Button("Yes") then
-            if deleteType == "group" then
-                Configuration.deleteGroup(config, deleteTarget)
-                Write.Info("Deleted group: %s", deleteTarget)
-            elseif deleteType == "groupset" then
-                Configuration.deleteGroupSet(config, deleteTarget)
-                Write.Info("Deleted group set: %s", deleteTarget)
-            end
-            showDeleteConfirmDialog = false
-            showSaveGroupDialog = false
-            showSaveGroupSetDialog = false
-        end
-        
-        ImGui.SameLine()
-        if ImGui.Button("No") then
-            showDeleteConfirmDialog = false
-        end
-    end
-    ImGui.End()
-end
 
-function drawOverwriteConfirmDialog()
-    if not showOverwriteConfirmDialog then return end
-    
-    ImGui.SetNextWindowSize(400, 150)
-    showOverwriteConfirmDialog, shouldDraw = ImGui.Begin("Confirm Overwrite", showOverwriteConfirmDialog, ImGuiWindowFlags.NoResize)
-    
-    if shouldDraw then
-        ImGui.Text("A " .. (overwriteType or "item") .. " with a similar name already exists:")
-        ImGui.Text("'" .. (overwriteTarget or "unknown") .. "'")
-        ImGui.Text("")
-        ImGui.Text("Do you want to overwrite it?")
-        
-        if ImGui.Button("Yes, Overwrite") then
-            if overwriteType == "groupset" and overwriteData then
-                local finalSetName, wasOverwrite = Configuration.saveGroupSet(config, overwriteData.setName, overwriteData.groupBlocks)
-                Write.Info("Overwritten group set '%s' with automatic subgroup naming", finalSetName)
-            elseif overwriteType == "group" and overwriteData then
-                local finalGroupName, wasOverwrite = Configuration.saveGroup(config, overwriteData.groupName, overwriteData.members)
-                Write.Info("Overwritten group '%s'", finalGroupName)
-            end
-            showOverwriteConfirmDialog = false
-        end
-        
-        ImGui.SameLine()
-        if ImGui.Button("Cancel") then
-            showOverwriteConfirmDialog = false
-            -- Reopen the appropriate save dialog
-            if overwriteType == "groupset" then
-                showSaveGroupSetDialog = true
-            elseif overwriteType == "group" then
-                showSaveGroupDialog = true
-            end
-        end
-    end
-    ImGui.End()
-end
 
 function UI.shouldExit()
     return not isOpen
@@ -815,76 +979,9 @@ end
 
 -- Public function to refresh peer data
 function UI.refreshPeers()
-    initializePeers()
+    refreshAvailablePeers()
 end
 
--- Load a group set (multiple groups)
-function loadGroupSet(setName)
-    if not config or not config.groupSets or not config.groupSets[setName] then
-        Write.Warn("Group set '%s' not found", setName)
-        return
-    end
-    
-    -- Clear current groups and reset to available peers
-    for _, group in ipairs(groupBlocks) do
-        for _, member in ipairs(group.members) do
-            -- Find full peer data and add back to available
-            local allPeers = Common.getDannetPeers()
-            for _, peer in ipairs(allPeers) do
-                if string.lower(peer.name) == string.lower(member.name) then
-                    table.insert(availablePeers, peer)
-                    break
-                end
-            end
-        end
-    end
-    
-    -- Load the group set
-    local groupNames = config.groupSets[setName]
-    groupBlocks = {}
-    
-    for i, groupName in ipairs(groupNames) do
-        if config.groups[groupName] then
-            local savedGroup = config.groups[groupName]
-            local newGroup = {
-                name = groupName,  -- Use the actual group name from config
-                members = {}
-            }
-            
-            -- Load members into the group
-            for _, savedMember in ipairs(savedGroup.members) do
-                -- Remove from available peers and add to group (case-insensitive)
-                local found = false
-                for j = #availablePeers, 1, -1 do
-                    if string.lower(availablePeers[j].name) == string.lower(savedMember.name) then
-                        table.insert(newGroup.members, {
-                            name = availablePeers[j].name,  -- Use actual peer name
-                            class = availablePeers[j].class,
-                            level = availablePeers[j].level,
-                            ac = availablePeers[j].ac,
-                            maxhp = availablePeers[j].maxhp,
-                            maxmana = availablePeers[j].maxmana,
-                            maxendurance = availablePeers[j].maxendurance,
-                            zone = availablePeers[j].zone,
-                            roles = savedMember.roles or {}
-                        })
-                        table.remove(availablePeers, j)
-                        found = true
-                        break
-                    end
-                end
-                
-                if not found then
-                    Write.Warn("Warning: Saved member '%s' not found in available peers", savedMember.name)
-                end
-            end
-            
-            table.insert(groupBlocks, newGroup)
-        end
-    end
-    
-    Write.Info("Loaded group set: %s (%d groups)", setName, #groupBlocks)
-end
 
 -- Check if group formation is requested (call from main thread)
 function UI.checkFormGroupsRequest()
@@ -906,86 +1003,6 @@ function UI.clearFormGroupsResults()
     formGroupsResults = nil
 end
 
--- Form all current groups (moved to be called from main thread)
-function formCurrentGroups()
-    local groupsToForm = {}
-    
-    -- Collect all groups with more than 1 member
-    for i, group in ipairs(groupBlocks) do
-        if #group.members > 1 then
-            table.insert(groupsToForm, {
-                name = group.name or ("TempGroup_" .. i),  -- Use actual name if available
-                members = group.members
-            })
-        end
-    end
-    
-    if #groupsToForm == 0 then
-        Write.Warn("No groups with multiple members to form")
-        return
-    end
-    
-    Write.Info("Forming %d groups using smart formation...", #groupsToForm)
-    
-    -- Form each group and count successes
-    local successCount = 0
-    for _, groupData in ipairs(groupsToForm) do
-        local success, message = Common.formGroup(groupData, config.keepRaid, config.delay, config.maxRetries)
-        if success then
-            Write.Info("✓ %s: %s", groupData.name, message)
-            successCount = successCount + 1
-        else
-            Write.Error("✗ %s: %s", groupData.name, message)
-        end
-    end
-    
-    Write.Info("Group formation complete!")
-    
-    -- Update results and clear progress flag
-    formGroupsResults = {
-        success = successCount == #groupsToForm,
-        message = string.format("%d/%d groups formed", successCount, #groupsToForm)
-    }
-    formGroupsInProgress = false
-end
 
--- Load a single group
-function loadSingleGroup(groupName)
-    if not config or not config.groups or not config.groups[groupName] then
-        Write.Warn("Group '%s' not found", groupName)
-        return
-    end
-    
-    local savedGroup = config.groups[groupName]
-    local newGroup = {
-        name = groupName,
-        members = {}
-    }
-    
-    -- Load members into the group
-    for _, savedMember in ipairs(savedGroup.members) do
-        -- Remove from available peers and add to group
-        for j = #availablePeers, 1, -1 do
-            if availablePeers[j].name == savedMember.name then
-                table.insert(newGroup.members, {
-                    name = savedMember.name,
-                    class = availablePeers[j].class,
-                    level = availablePeers[j].level,
-                    ac = availablePeers[j].ac,
-                    maxhp = availablePeers[j].maxhp,
-                    maxmana = availablePeers[j].maxmana,
-                    maxendurance = availablePeers[j].maxendurance,
-                    zone = availablePeers[j].zone,
-                    roles = savedMember.roles or {}
-                })
-                table.remove(availablePeers, j)
-                break
-            end
-        end
-    end
-    
-    table.insert(groupBlocks, newGroup)
-    Write.Info("Loaded group: %s (%d members)", groupName, #newGroup.members)
-end
 
 return UI

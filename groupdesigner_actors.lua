@@ -3,6 +3,7 @@
 local mq = require('mq')
 local actors = require('actors')
 local Write = require('utils.Write')
+local Common = require('utils.common')
 
 local myName = mq.TLO.Me.Name()
 local myActor = nil
@@ -14,7 +15,7 @@ local isMaster = false
 local function getCharData()
     local function safe(fn, default)
         local success, result = pcall(fn)
-        if success and result and result ~= "NULL" and result ~= "" then
+        if success and Common.isSafeString(result) then
             return tostring(result)
         end
         return default or "---"
