@@ -118,8 +118,10 @@ function Common.processPendingQueries(delay, shouldExitFunc)
 
         if Common.isSafeString(result) then
             queryResults[queryId] = result
+            Write.Debug("Query result for %s: %s = %s", queryData.peer, queryId, result)
         else
             queryResults[queryId] = nil
+            Write.Debug("No result for query %s from %s", queryId, queryData.peer)
         end
         
         -- Remove from pending
@@ -199,18 +201,28 @@ function Common.updatePeerDataFromResults(peers)
     for i, peer in ipairs(peers) do
         if peer.loading then
             -- Get results from async queries, keep "---" if no data
-            peer.class = getQueryResult(peer.name .. "_class") or "---"
-            peer.level = getQueryResult(peer.name .. "_level") or "---"
-            peer.ac = getQueryResult(peer.name .. "_ac") or "---"
-            peer.maxhp = getQueryResult(peer.name .. "_maxhp") or "---"
-            peer.maxmana = getQueryResult(peer.name .. "_maxmana") or "---"
-            peer.maxendurance = getQueryResult(peer.name .. "_maxendurance") or "---"
-            peer.zone = getQueryResult(peer.name .. "_zone") or "---"
-            
+            local newClass = getQueryResult(peer.name .. "_class")
+            local newLevel = getQueryResult(peer.name .. "_level")
+            local newAC = getQueryResult(peer.name .. "_ac")
+            local newMaxHP = getQueryResult(peer.name .. "_maxhp")
+            local newMaxMana = getQueryResult(peer.name .. "_maxmana")
+            local newMaxEnd = getQueryResult(peer.name .. "_maxendurance")
+            local newZone = getQueryResult(peer.name .. "_zone")
+
+            -- Update fields with results or keep "---"
+            peer.class = newClass or "---"
+            peer.level = newLevel or "---"
+            peer.ac = newAC or "---"
+            peer.maxhp = newMaxHP or "---"
+            peer.maxmana = newMaxMana or "---"
+            peer.maxendurance = newMaxEnd or "---"
+            peer.zone = newZone or "---"
+
             -- Stop loading if we got class data (main indicator)
             if peer.class ~= "---" then
                 peer.loading = false
-                Write.Debug("Peer %s data loaded", peer.name)
+                Write.Debug("Peer %s data loaded: Class=%s Level=%s AC=%s HP=%s Mana=%s End=%s",
+                    peer.name, peer.class, peer.level, peer.ac, peer.maxhp, peer.maxmana, peer.maxendurance)
             end
         end
     end
@@ -220,9 +232,12 @@ function Common.getDannetPeers()
     local actorManager = getActorManager()
     if actorManager and actorManager.isEnabled() then
         -- Use Actor system data if available
+        Write.Debug("Common.getDannetPeers: Using Actor system for peer data")
         return actorManager.getPeerData()
     else
         -- Fallback to DanNet
+        Write.Debug("Common.getDannetPeers: Using DanNet fallback for peer data (actors enabled: %s)",
+            actorManager and actorManager.isEnabled() or "false")
         return Common.initializePeers()
     end
 end

@@ -15,7 +15,7 @@ local isMaster = false
 local function getCharData()
     local function safe(fn, default)
         local success, result = pcall(fn)
-        if success and Common.isSafeString(result) then
+        if success and result ~= nil and result ~= "NULL" and tostring(result) ~= "" then
             return tostring(result)
         end
         return default or "---"
