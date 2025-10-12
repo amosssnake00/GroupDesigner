@@ -1,5 +1,5 @@
 local mq = require('mq')
-local Write = require('knightlinc.Write')
+local Write = require('utils.Write')
 
 -- Configure Write.lua if not already done
 if not Write.prefix then
@@ -42,10 +42,6 @@ Common.ROLE_CODES = {
     [Common.ROLES.MASTER_LOOTER] = 5
 }
 
-function Common.printf(fmt, ...)
-    Write.Info(fmt, ...)
-end
-
 function Common.delay(ms)
     mq.delay(ms)
 end
@@ -55,200 +51,22 @@ function Common.isSafeString(value)
     return value and type(value) == "string" and value ~= "" and value ~= "NULL"
 end
 
--- Async query system
-local pendingQueries = {}
-local queryResults = {}
-
--- Queue a query for async processing
-local function queueQuery(peerName, queryString, queryId)
-    pendingQueries[queryId] = {
-        peer = peerName,
-        query = queryString,
-        timestamp = os.clock()
-    }
-    --Common.printf("DEBUG: Queued query %s for %s: %s", queryId, peerName, queryString)
-end
-
--- Get result of a queued query
-local function getQueryResult(queryId)
-    return queryResults[queryId]
-end
-
--- Process pending queries (call from main thread, not ImGui)
-function Common.processPendingQueries(delay, shouldExitFunc)
-    delay = delay or 100  -- Default delay value
-    
-    for queryId, queryData in pairs(pendingQueries) do
-        -- Check if we should exit before processing each query
-        if shouldExitFunc and shouldExitFunc() then
-            Write.Debug("Exiting query processing due to shutdown")
-            -- Clear all pending queries
-            pendingQueries = {}
-            return
-        end
-        
-        -- Send the query with timeout slightly longer than max wait
-        mq.cmdf('/dquery %s -q %s -t %d', queryData.peer, queryData.query, delay * 30)
-        
-        -- Use a shorter check interval and check for exit condition
-        local maxWait = delay * 35
-        local elapsed = 0
-        local checkInterval = 100
-        
-        while elapsed < maxWait do
-            -- Check for exit condition
-            if shouldExitFunc and shouldExitFunc() then
-                Write.Debug("Exiting query wait due to shutdown")
-                pendingQueries = {}
-                return
-            end
-            
-            -- Check if query received
-            local received = mq.TLO.DanNet(queryData.peer).QReceived(queryData.query)()
-            if received and received > 0 then
-                break
-            end
-            
-            mq.delay(checkInterval)
-            elapsed = elapsed + checkInterval
-        end
-        
-        -- Get the result
-        local result = mq.TLO.DanNet(queryData.peer).Q(queryData.query)()
-
-        if Common.isSafeString(result) then
-            queryResults[queryId] = result
-            Write.Debug("Query result for %s: %s = %s", queryData.peer, queryId, result)
-        else
-            queryResults[queryId] = nil
-            Write.Debug("No result for query %s from %s", queryId, queryData.peer)
-        end
-        
-        -- Remove from pending
-        pendingQueries[queryId] = nil
-    end
-end
-
--- Get initial peer list immediately (names only)
-function Common.getDannetPeerNames()
-    local peerNames = {}
-    
-    -- Safety check for mq and TLO availability
-    if not mq or not mq.TLO or not mq.TLO.DanNet then
-        return peerNames
-    end
-    
-    local dannetPeers = nil
-    local success, result = pcall(function() return mq.TLO.DanNet.Peers() end)
-    if success then
-        dannetPeers = result
-    end
-    
-    if Common.isSafeString(dannetPeers) then
-        for peer in string.gmatch(dannetPeers, "([^|]+)") do
-            if Common.isSafeString(peer) then
-                table.insert(peerNames, peer)
-            end
-        end
-    end
-    
-    return peerNames
-end
-
--- Initialize peers with basic data, then populate details
-function Common.initializePeers()
-    local peers = {}
-    local peerNames = Common.getDannetPeerNames()
-    
-    -- Create initial peer entries with just names
-    for _, peerName in ipairs(peerNames) do
-        table.insert(peers, {
-            name = peerName,
-            class = "---",
-            level = "---",
-            ac = "---",
-            maxhp = "---",
-            maxmana = "---",
-            maxendurance = "---",
-            zone = "---",
-            loading = true
-        })
-    end
-    
-    return peers
-end
-
-
--- Queue peer data queries (call from ImGui)
-function Common.queuePeerDataQueries(peers)
-    --Common.printf("DEBUG: queuePeerDataQueries called with %d peers", #peers)
-    for i, peer in ipairs(peers) do
-        if peer.loading then
-            Write.Debug("Queueing queries for %s", peer.name)
-            queueQuery(peer.name, 'Me.Class.ShortName', peer.name .. "_class")
-            queueQuery(peer.name, 'Me.Level', peer.name .. "_level")
-            queueQuery(peer.name, 'Window["InventoryWindow"].Child["IW_ACNumber"].Text', peer.name .. "_ac")
-            queueQuery(peer.name, 'Me.MaxHPs', peer.name .. "_maxhp")
-            queueQuery(peer.name, 'Me.MaxMana', peer.name .. "_maxmana")
-            queueQuery(peer.name, 'Me.MaxEndurance', peer.name .. "_maxendurance")
-            queueQuery(peer.name, 'Zone.ShortName', peer.name .. "_zone")
-        end
-    end
-end
-
--- Update peer data with query results (call from ImGui)
-function Common.updatePeerDataFromResults(peers)
-    for i, peer in ipairs(peers) do
-        if peer.loading then
-            -- Get results from async queries, keep "---" if no data
-            local newClass = getQueryResult(peer.name .. "_class")
-            local newLevel = getQueryResult(peer.name .. "_level")
-            local newAC = getQueryResult(peer.name .. "_ac")
-            local newMaxHP = getQueryResult(peer.name .. "_maxhp")
-            local newMaxMana = getQueryResult(peer.name .. "_maxmana")
-            local newMaxEnd = getQueryResult(peer.name .. "_maxendurance")
-            local newZone = getQueryResult(peer.name .. "_zone")
-
-            -- Update fields with results or keep "---"
-            peer.class = newClass or "---"
-            peer.level = newLevel or "---"
-            peer.ac = newAC or "---"
-            peer.maxhp = newMaxHP or "---"
-            peer.maxmana = newMaxMana or "---"
-            peer.maxendurance = newMaxEnd or "---"
-            peer.zone = newZone or "---"
-
-            -- Stop loading if we got class data (main indicator)
-            if peer.class ~= "---" then
-                peer.loading = false
-                Write.Debug("Peer %s data loaded: Class=%s Level=%s AC=%s HP=%s Mana=%s End=%s",
-                    peer.name, peer.class, peer.level, peer.ac, peer.maxhp, peer.maxmana, peer.maxendurance)
-            end
-        end
-    end
-end
-
-function Common.getDannetPeers()
+-- Get peer data from Actor system only
+function Common.getPeers()
     local actorManager = getActorManager()
     if actorManager and actorManager.isEnabled() then
-        -- Use Actor system data if available
-        Write.Debug("Common.getDannetPeers: Using Actor system for peer data")
+        -- Use Actor system data
+        Write.Debug("Common.getPeers: Using Actor system for peer data")
         return actorManager.getPeerData()
     else
-        -- Fallback to DanNet
-        Write.Debug("Common.getDannetPeers: Using DanNet fallback for peer data (actors enabled: %s)",
-            actorManager and actorManager.isEnabled() or "false")
-        return Common.initializePeers()
+        -- No actors = no peers
+        Write.Warn("Common.getPeers: Actor system not active, no peers available")
+        return {}
     end
 end
 
--- Initialize Actor system if configured
+-- Initialize Actor system (always required)
 function Common.initActorSystem(config)
-    if not config or not config.useActors then
-        Write.Debug("Common.initActorSystem: config.useActors is false or nil")
-        return false
-    end
-    
     Write.Debug("Common.initActorSystem: Attempting to get ActorManager...")
     local actorManager = getActorManager()
     if actorManager then
@@ -299,7 +117,7 @@ function Common.getLocalCharacterName()
     return nil
 end
 
--- Send command to specific character (handles local vs remote automatically)
+-- Send command to specific character (via DanNet for remote, direct for local)
 function Common.sendCommandToCharacter(characterName, command)
     local localName = Common.getLocalCharacterName()
     if localName and string.lower(characterName) == string.lower(localName) then
@@ -314,34 +132,42 @@ end
 -- Analyze current group membership and determine what needs to change
 function Common.analyzeGroupChanges(leaderName, expectedMembers, delay)
     delay = delay or 100
-    Write.Debug("Analyzing current group state for leader: %s", leaderName)
-    
+    Write.Debug(string.format("Analyzing current group state for leader: %s", leaderName))
+
     local localName = Common.getLocalCharacterName()
     local currentMembers = {}
-    
-    -- Query current group members
-    for i = 0, 5 do
-        local memberName = nil
 
-        if localName and string.lower(leaderName) == string.lower(localName) then
-            -- Direct query for local character
+    -- Query current group members
+    local members = {}
+    if localName and string.lower(leaderName) == string.lower(localName) then
+        -- Direct query for local character
+        for i = 0, 5 do
             local success, result = pcall(function() return mq.TLO.Group.Member(i)() end)
             if success and Common.isSafeString(result) then
-                memberName = result
+                table.insert(members, result)
             end
-        else
-            -- Remote query via DanNet
-            mq.cmdf('/dquery %s -q Group.Member[%d] -t %d', leaderName, i, delay * 25)
-            mq.delay(delay * 30, function() 
-                local received = mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))()
-                return received and received > 0
-            end)
-            memberName = mq.TLO.DanNet(leaderName).Q(string.format('Group.Member[%d]', i))()
         end
-        
-        if Common.isSafeString(memberName) then
-            currentMembers[string.lower(memberName)] = true
-            Write.Debug("Current group member: %s", memberName)
+        Write.Debug(string.format("Local group query found %d members", #members))
+    else
+        -- Query via Actor system for remote leader
+        Write.Debug(string.format("Querying remote leader %s via Actors", leaderName))
+        local actorManager = getActorManager()
+        if actorManager and actorManager.isEnabled() then
+            members = actorManager.queryGroupMembers(leaderName, delay * 30) or {}
+            Write.Debug(string.format("Actor query found %d members from %s", #members, leaderName))
+        else
+            Write.Error("Actor system not available for querying %s", leaderName)
+            members = {}
+        end
+    end
+
+    -- Build currentMembers table
+    if members then
+        for _, memberName in ipairs(members) do
+            if Common.isSafeString(memberName) then
+                currentMembers[string.lower(memberName)] = true
+                Write.Debug("Current group member: %s", memberName)
+            end
         end
     end
     
@@ -389,36 +215,39 @@ end
 -- Verify group formation via leader's perspective
 function Common.verifyGroupViaLeader(leaderName, expectedMembers, delay)
     delay = delay or 100  -- Default delay value
-    Write.Debug("Verifying group via leader %s", leaderName)
-    
+    Write.Debug(string.format("Verifying group via leader %s", leaderName))
+
     local localName = Common.getLocalCharacterName()
     local actualMembers = {}
-    
-    -- Query each group member slot (0-5)
-    for i = 0, 5 do
-        local memberName = nil
-        
-        if localName and string.lower(leaderName) == string.lower(localName) then
-            -- Direct query for local character
+
+    -- Query group members
+    local members = {}
+    if localName and string.lower(leaderName) == string.lower(localName) then
+        -- Direct query for local character
+        for i = 0, 5 do
             local success, result = pcall(function() return mq.TLO.Group.Member(i)() end)
             if success and Common.isSafeString(result) then
-                memberName = result
+                table.insert(members, result)
             end
-        else
-            -- Remote query via DanNet
-            mq.cmdf('/dquery %s -q Group.Member[%d] -t %d', leaderName, i, delay * 25)
-            mq.delay(delay * 30, function()
-                local received = mq.TLO.DanNet(leaderName).QReceived(string.format('Group.Member[%d]', i))()
-                return received and received > 0
-            end)
-            memberName = mq.TLO.DanNet(leaderName).Q(string.format('Group.Member[%d]', i))()
         end
+    else
+        -- Query via Actor system for remote leader
+        Write.Debug(string.format("Querying remote leader %s via Actors", leaderName))
+        local actorManager = getActorManager()
+        if actorManager and actorManager.isEnabled() then
+            members = actorManager.queryGroupMembers(leaderName, delay * 30) or {}
+            Write.Debug(string.format("Actor query found %d members from %s", #members, leaderName))
+        else
+            Write.Error("Actor system not available for querying %s", leaderName)
+            members = {}
+        end
+    end
 
+    -- Build actualMembers table
+    for i, memberName in ipairs(members) do
         if Common.isSafeString(memberName) then
             actualMembers[string.lower(memberName)] = true  -- Store in lowercase for comparison
-            Write.Debug("Group slot %d: %s", i, memberName)
-        else
-            Write.Debug("Group slot %d: empty", i)
+            Write.Debug(string.format("Group slot %d: %s", i-1, memberName))
         end
     end
     
@@ -467,6 +296,7 @@ function Common.formGroup(groupData, keepRaid, delay, maxRetries)
     
     -- Step 1: Analyze current group state
     local changes = Common.analyzeGroupChanges(leader.name, groupData.members, delay)
+    local earlySuccess = false
     
     if changes.totalChanges == 0 then
         Write.Debug("Group is already correctly formed! No changes needed.")
@@ -511,19 +341,55 @@ function Common.formGroup(groupData, keepRaid, delay, maxRetries)
             for _, memberName in ipairs(changes.toInvite) do
                 if memberName ~= leader.name then
                     Common.sendCommandToCharacter(leader.name, string.format('/docommand /inv %s', memberName))
+                    Write.Debug("Sent invite to %s", memberName)
                 end
             end
-            
+
             Write.Debug("Waiting for %d invitations to be accepted...", #changes.toInvite)
-            mq.delay(delay * 20)  -- 2000ms default
+            -- Use callback-based waiting with increased timeout
+            local maxWait = delay * 50  -- 5000ms default (increased from 2000ms)
+            local elapsed = 0
+            local checkInterval = 500
+            
+
+            while elapsed < maxWait do
+                -- Check if all members have joined
+                local verifySuccess, _ = Common.verifyGroupViaLeader(leader.name, groupData.members, delay)
+                if verifySuccess then
+                    Write.Debug(string.format("All members joined successfully after %dms", elapsed))
+                    earlySuccess = true
+                    break
+                end
+                mq.delay(checkInterval)
+                elapsed = elapsed + checkInterval
+            end
+
+            if elapsed >= maxWait then
+                Write.Warn(string.format("Timeout waiting for all members to join after %dms", maxWait))
+            end
         end
     end
-    
-    -- Step 5: Verify group with retry logic
+
+    -- Step 5: Verify group with retry logic (skip if already verified)
     local success = false
     local finalMissingMembers = {}
-    
-    for attempt = 1, maxRetries do
+
+    -- Quick check first - if we already verified in callback, confirm it
+    if earlySuccess then
+        local verifySuccess, missingMembers = Common.verifyGroupViaLeader(leader.name, groupData.members, delay)
+        if verifySuccess then
+            success = true
+            Write.Debug("Group formation successful (confirmed from callback)")
+        else
+            -- Callback said success but verification failed, need retry
+            Write.Warn("Callback reported success but verification failed, retrying...")
+            finalMissingMembers = missingMembers
+        end
+    end
+
+    -- Only do retry loop if not already successful
+    if not success then
+        for attempt = 1, maxRetries do
         local verifySuccess, missingMembers = Common.verifyGroupViaLeader(leader.name, groupData.members, delay)
         
         if verifySuccess then
@@ -551,8 +417,9 @@ function Common.formGroup(groupData, keepRaid, delay, maxRetries)
                 Write.Debug("All retry attempts exhausted - continuing with partial group")
             end
         end
-    end
-    
+        end  -- End for attempt loop
+    end  -- End if not success
+
     -- Step 6: Set roles (only for members who successfully joined)
     if success or #finalMissingMembers < #groupData.members then
         Write.Debug("Setting roles for group members")

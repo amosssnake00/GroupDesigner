@@ -73,25 +73,25 @@ local function main()
     
     -- Check if we need to handle command line args
     local hasCommandLineArgs = #args > 0 and (string.lower(args[1]) == "form" or string.lower(args[1]) == "info")
-    
-    -- Initialize Actor system if configured (needed for both UI and command line)
-    if config.useActors then
-        Write.Debug("Initializing Actor system...")
-        local success, actorSuccess = pcall(function() return Common.initActorSystem(config) end)
-        if success and actorSuccess then
-            Write.Debug("Actor system initialized successfully")
-            
-            -- If we have command line args, wait for peers to be discovered
-            if hasCommandLineArgs and string.lower(args[1]) == "form" then
-                waitForActorPeers(10)
-            end
-        else
-            if not success then
-                Write.Error("Actor system initialization error: %s", tostring(actorSuccess))
-            else
-                Write.Warn("Actor system initialization failed, falling back to DanNet")
-            end
+
+    -- Initialize Actor system (always required)
+    Write.Info("Initializing Actor system...")
+    local success, actorSuccess = pcall(function() return Common.initActorSystem(config) end)
+    if success and actorSuccess then
+        Write.Info("Actor system initialized successfully")
+
+        -- If we have command line args, wait for peers to be discovered
+        if hasCommandLineArgs and string.lower(args[1]) == "form" then
+            waitForActorPeers(10)
         end
+    else
+        if not success then
+            Write.Error("Actor system initialization error: %s", tostring(actorSuccess))
+        else
+            Write.Error("Actor system initialization failed - cannot continue")
+        end
+        Write.Error("GroupDesigner requires the Actor system to function")
+        return
     end
     
     -- Now handle command line args after actors are ready
@@ -110,10 +110,8 @@ local function main()
     isRunning = true
     
     Write.Info("GroupDesigner started. Use /groupdesigner for commands.")
-    if config.useActors then
-        Write.Debug("Actor system: %s", Common.isActorSystemActive() and "Active" or "Inactive")
-    end
-    
+    Write.Debug("Actor system: %s", Common.isActorSystemActive() and "Active" or "Inactive")
+
     -- Use MQ ImGui pattern - no manual draw loop needed
     while isRunning do
         -- Check exit condition first
@@ -121,13 +119,8 @@ local function main()
             Write.Info("UI closed by user, exiting main loop")
             break
         end
-        
-        -- Process pending queries in main thread (not ImGui thread)
-        if not Common.isActorSystemActive() then
-            Common.processPendingQueries(config.delay, UI.shouldExit)
-        end
-        
-        -- Update Actor system if active
+
+        -- Update Actor system
         Common.updateActorSystem()
         
         -- Check for group formation requests from UI (thread-safe)

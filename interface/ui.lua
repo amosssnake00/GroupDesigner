@@ -36,15 +36,15 @@ local groupBlocks = {}
 local lastPeerRefresh = 0
 local autoRefreshInterval = 3  -- seconds
 
--- Refresh available peers from DanNet and actors if enabled
+-- Refresh available peers from Actor system
 local function refreshAvailablePeers()
-    -- Refresh actors data if the system is active
-    if config and config.useActors and Common.isActorSystemActive() then
+    -- Refresh actors data
+    if Common.isActorSystemActive() then
         Common.updateActorSystem()
         Write.Debug("Refreshed actor system data")
     end
 
-    local allPeers = Common.getDannetPeers()
+    local allPeers = Common.getPeers()
     availablePeers = {}
 
     -- Filter out peers that are already assigned to groups
@@ -68,10 +68,7 @@ local function refreshAvailablePeers()
         end
     end
 
-    Write.Debug("DanNet: Found %d total peers, %d available", #allPeers, #availablePeers)
-
-    -- Automatically queue queries for peer data
-    Common.queuePeerDataQueries(availablePeers)
+    Write.Debug("Actors: Found %d total peers, %d available", #allPeers, #availablePeers)
 end
 
 -- Load a group set (multiple groups)
@@ -85,7 +82,7 @@ local function loadGroupSet(setName)
     for _, group in ipairs(groupBlocks) do
         for _, member in ipairs(group.members) do
             -- Find full peer data and add back to available
-            local allPeers = Common.getDannetPeers()
+            local allPeers = Common.getPeers()
             for _, peer in ipairs(allPeers) do
                 if string.lower(peer.name) == string.lower(member.name) then
                     table.insert(availablePeers, peer)
@@ -499,7 +496,7 @@ function UI.init(cfg)
     
     -- Register the ImGui callback using proper MQ pattern
     mq.imgui.init('groupdesigner', UI.updateImGui)
-    Write.Debug("GroupDesigner UI initialized with DanNet data - %d peers available", #availablePeers)
+    Write.Debug("GroupDesigner UI initialized with Actor data - %d peers available", #availablePeers)
 end
 
 
@@ -520,8 +517,8 @@ function UI.updateImGui()
     -- Don't draw the UI if the UI was closed by pressing the X button
     if not isOpen then return end
     
-    -- Auto-refresh peers when using actors
-    if config and config.useActors and Common.isActorSystemActive() then
+    -- Auto-refresh peers from actor system
+    if Common.isActorSystemActive() then
         local now = os.time()
         if now - lastPeerRefresh >= autoRefreshInterval then
             refreshAvailablePeers()
@@ -530,9 +527,6 @@ function UI.updateImGui()
             initializeGroupBlocks()
         end
     end
-    
-    -- Auto-refresh query results for loading peers
-    Common.updatePeerDataFromResults(availablePeers)
     
     -- Update group blocks if we have peers now but no groups yet
     if #availablePeers > 0 and #groupBlocks == 0 then
@@ -561,32 +555,6 @@ function UI.updateImGui()
         ImGui.Text("Options:")
         ImGui.SameLine()
         config.keepRaid = ImGui.Checkbox("Keep Raid", config.keepRaid or false)
-        ImGui.SameLine()
-        
-        -- Use Actors checkbox with status indicator
-        local actorsActive = Common.isActorSystemActive()
-        local actorsFailed = Common.hasActorSystemFailed()
-        local newActorSetting = ImGui.Checkbox("Use Actors", config.useActors or false)
-        if newActorSetting ~= config.useActors then
-            config.useActors = newActorSetting
-            if newActorSetting then
-                ImGui.Text("Restart required to enable Actor system")
-            else
-                ImGui.Text("Restart required to disable Actor system")
-            end
-        end
-        
-        if actorsActive then
-            ImGui.SameLine()
-            ImGui.TextColored(0.2, 0.8, 0.2, 1.0, "(Active)")
-        elseif config.useActors and actorsFailed then
-            ImGui.SameLine()
-            ImGui.TextColored(0.8, 0.2, 0.2, 1.0, "(Failed to initialize)")
-        elseif config.useActors then
-            ImGui.SameLine()
-            ImGui.TextColored(0.8, 0.8, 0.2, 1.0, "(Pending restart)")
-        end
-        
         ImGui.SameLine()
         ImGui.Text("Delay (ms):")
         ImGui.SameLine()
@@ -850,8 +818,8 @@ function UI.updateImGui()
                             -- Right click context menu for roles and removal
                             if ImGui.BeginPopupContextItem("member_" .. i .. "_" .. j) then
                                 if ImGui.MenuItem("Remove from group") then
-                                    -- Find the full peer data from DanNet and add back to available
-                                    local allPeers = Common.getDannetPeers()
+                                    -- Find the full peer data from Actor system and add back to available
+                                    local allPeers = Common.getPeers()
                                     for _, peer in ipairs(allPeers) do
                                         if peer.name == member.name then
                                             table.insert(availablePeers, peer)

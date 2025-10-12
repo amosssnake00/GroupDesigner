@@ -94,10 +94,7 @@ function Commands.showInfo()
     Common.printf("Keep Raid: %s", config.keepRaid and "Yes" or "No")
     Common.printf("Delay: %d ms", config.delay)
     Common.printf("Max Retries: %d", config.maxRetries)
-    Common.printf("Use Actors: %s", config.useActors and "Yes" or "No")
-    if config.useActors then
-        Common.printf("Actor System: %s", Common.isActorSystemActive() and "Active" or "Inactive")
-    end
+    Common.printf("Actor System: %s", Common.isActorSystemActive() and "Active" or "Inactive")
     Common.printf("")
     
     if next(config.groups) then

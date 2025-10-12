@@ -16,33 +16,36 @@ local masterScriptPID = nil
 -- Message handler for master's inbox
 local function messageHandler(message)
     if not message or not message.content then return end
-    
+
     local content = message.content
     local sender = message.sender
-    
+
+    Write.Debug(string.format("ActorManager: Received message type=%s", content.type or "nil"))
+
     -- Handle peer data responses
     if content.type == "peer_data" and content.name then
-        Write.Debug("Master: Received peer data from %s", content.name)
+        Write.Debug(string.format("ActorManager: Received peer data from %s", content.name))
         peerData[content.name] = {
             name = content.name,
             class = content.class or "---",
             level = content.level or "---",
-            maxhp = content.maxhp or "---", 
+            maxhp = content.maxhp or "---",
             maxmana = content.maxmana or "---",
             maxendurance = content.maxendurance or "---",
             zone = content.zone or "---",
             loading = false,
             fromActor = true
         }
+    -- Handle group data responses
+    elseif content.type == "group_data" and content.character and content.members then
+        Write.Debug(string.format("ActorManager: Received group data from %s with %d members", content.character, #content.members))
+        -- Store temporarily with a special key for queryGroupMembers to find
+        peerData["group_" .. content.character] = content.members
     end
 end
 
 -- Initialize system
 function ActorManager.init(config)
-    if not config.useActors then
-        return false
-    end
-    
     Write.Debug("ActorManager: Initializing MVP system...")
     
     -- Register master's inbox actor
@@ -185,10 +188,53 @@ function ActorManager.requestPeerData()
     return false
 end
 
+-- Query group members from a specific character via actors
+function ActorManager.queryGroupMembers(characterName, timeout)
+    if not isEnabled or not masterActor then
+        Write.Error("ActorManager: Cannot query group - actor system not active")
+        return nil
+    end
+
+    timeout = timeout or 2000  -- Default 2 second timeout
+
+    -- Send query to the actor script using proper mailbox addressing
+    Write.Debug(string.format("ActorManager: Sending query_group for %s", characterName))
+    -- Send to the actor script mailbox on all characters
+    masterActor:send(
+        {script = "GroupDesigner/groupdesigner_actors"},
+        {type = "query_group", target = characterName}
+    )
+
+    -- Wait for response in the message handler (peerData table will be updated)
+    local elapsed = 0
+    local checkInterval = 100
+    local responseKey = "group_" .. characterName
+
+    -- Give message handler time to process (messages are processed during mq.delay)
+    mq.delay(checkInterval)
+    elapsed = elapsed + checkInterval
+
+    while elapsed < timeout do
+        -- Check if we received a response (stored in peerData temporarily)
+        if peerData[responseKey] then
+            local members = peerData[responseKey]
+            peerData[responseKey] = nil  -- Clean up
+            Write.Debug(string.format("ActorManager: Got %d group members from %s", #members, characterName))
+            return members
+        end
+
+        mq.delay(checkInterval)
+        elapsed = elapsed + checkInterval
+    end
+
+    Write.Warn(string.format("ActorManager: Timeout waiting for group data from %s", characterName))
+    return nil
+end
+
 function ActorManager.shutdownAllActors()
     -- Stop the local master script
     mq.cmd('/squelch /lua stop GroupDesigner/groupdesigner_actors')
-    
+
     -- Stop all peer actor scripts
     local dannetPeers = nil
     local success, result = pcall(function() return mq.TLO.DanNet.Peers() end)
@@ -199,20 +245,25 @@ function ActorManager.shutdownAllActors()
             end
         end
     end
-    
+
     -- Clean up the peer data file
     local dataFile = mq.configDir .. "/GroupDesigner_peers.lua"
     os.remove(dataFile)
-    
+
+    -- Clean up any group query files
+    local pattern = mq.configDir .. "/GroupDesigner_group_*.lua"
+    -- Note: Lua doesn't have native glob, so we'll just try to remove common ones
+    -- The files will be cleaned on next run anyway
+
     if masterActor then
         masterActor:unregister()
         masterActor = nil
     end
-    
+
     isEnabled = false
     initFailed = false
     peerData = {}
-    Write.Info("ActorManager: All actors shut down")
+    Write.Debug("ActorManager: All actors shut down")
 end
 
 return ActorManager

@@ -4,9 +4,8 @@ local Configuration = {}
 
 local defaultConfig = {
     keepRaid = false,
-    delay = 1000,
+    delay = 100,
     maxRetries = 3,
-    useActors = false,
     groups = {},
     groupSets = {},
     window = {
@@ -62,7 +61,6 @@ function Configuration.save(config)
         file:write(string.format('    keepRaid = %s,\n', tostring(config.keepRaid)))
         file:write(string.format('    delay = %d,\n', config.delay))
         file:write(string.format('    maxRetries = %d,\n', config.maxRetries))
-        file:write(string.format('    useActors = %s,\n', tostring(config.useActors)))
         
         file:write('    groups = {\n')
         for name, group in pairs(config.groups) do
